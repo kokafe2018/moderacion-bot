@@ -1,21 +1,40 @@
 import os
 import sqlite3
 import random
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
 # --- CONFIGURACIÓN ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-MODERATION_CHANNEL_ID = os.getenv("MODERATION_CHANNEL_ID")
-if MODERATION_CHANNEL_ID is not None:
-    try:
-        MODERATION_CHANNEL_ID = int(MODERATION_CHANNEL_ID)
-    except ValueError:
-        raise RuntimeError("MODERATION_CHANNEL_ID debe ser un número (chat_id del canal).")
+raw_channel_id = os.getenv("MODERATION_CHANNEL_ID")
 
-if not BOT_TOKEN or MODERATION_CHANNEL_ID is None:
-    raise RuntimeError("Faltan variables de entorno BOT_TOKEN o MODERATION_CHANNEL_ID.")
+missing_env = []
+if not BOT_TOKEN:
+    missing_env.append("BOT_TOKEN")
+if raw_channel_id is None:
+    missing_env.append("MODERATION_CHANNEL_ID")
+
+if missing_env:
+    raise RuntimeError(f"Faltan variables de entorno: {', '.join(missing_env)}.")
+
+try:
+    MODERATION_CHANNEL_ID = int(raw_channel_id)
+except ValueError:
+    raise RuntimeError("MODERATION_CHANNEL_ID debe ser un número (chat_id del canal).")
 OPCIONES_MENU = ["🧊 Rompehielos", "📝 Carta", "📱 New Feed", "🎤 Nota de voz", "📎 Adjunto"]
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+def start_health_server():
+    port = int(os.getenv("PORT", "8080"))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    server.serve_forever()
 
 # --- BASE DE DATOS ---
 def init_db():
@@ -158,6 +177,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     init_db()
+    Thread(target=start_health_server, daemon=True).start()
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, handle_messages))
