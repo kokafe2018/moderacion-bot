@@ -1,8 +1,8 @@
 import os
-import sqlite3
 import random
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Thread
+import psycopg2
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
@@ -25,6 +25,10 @@ except ValueError:
     raise RuntimeError("MODERATION_CHANNEL_ID debe ser un número (chat_id del canal).")
 OPCIONES_MENU = ["🧊 Rompehielos", "📝 Carta", "📱 New Feed", "🎤 Nota de voz", "📎 Adjunto"]
 
+DB_DSN = os.getenv("DATABASE_URL")
+if not DB_DSN:
+    raise RuntimeError("Falta la variable de entorno DATABASE_URL para conectar a Postgres.")
+
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -40,13 +44,27 @@ def start_health_server():
     server = HTTPServer(("0.0.0.0", port), HealthHandler)
     server.serve_forever()
 
+def get_connection():
+    return psycopg2.connect(DB_DSN)
+
+
 # --- BASE DE DATOS ---
 def init_db():
-    conn = sqlite3.connect('moderacion.db')
-    cursor = conn.cursor()
-    cursor.execute('''CREATE TABLE IF NOT EXISTS solicitudes 
-                     (msg_id TEXT PRIMARY KEY, user_id INTEGER, preview TEXT, categoria TEXT, ticket_id TEXT)''')
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS solicitudes (
+            msg_id TEXT PRIMARY KEY,
+            user_id BIGINT,
+            preview TEXT,
+            categoria TEXT,
+            ticket_id TEXT
+        )
+        """
+    )
     conn.commit()
+    cur.close()
     conn.close()
 
 # --- MANEJADORES ---
@@ -76,9 +94,11 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=data['op_id'], text=texto_rechazo, parse_mode="Markdown")
             await msg.reply_text(f"✅ Motivo para el Ticket `{data['ticket']}` enviado con éxito.")
             
-            conn = sqlite3.connect('moderacion.db')
-            conn.execute('DELETE FROM solicitudes WHERE msg_id = ?', (data['msg_id'],))
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute('DELETE FROM solicitudes WHERE msg_id = %s', (data['msg_id'],))
             conn.commit()
+            cur.close()
             conn.close()
         except Exception as e:
             await msg.reply_text(f"⚠️ Error: {e}")
@@ -118,10 +138,14 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(MODERATION_CHANNEL_ID, texto_panel, 
                                       reply_markup=InlineKeyboardMarkup(btns), parse_mode="Markdown")
         
-        conn = sqlite3.connect('moderacion.db')
-        conn.execute('INSERT INTO solicitudes VALUES (?, ?, ?, ?, ?)', 
-                     (str(fwd.message_id), user_id, preview, cat, ticket_id))
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            'INSERT INTO solicitudes (msg_id, user_id, preview, categoria, ticket_id) VALUES (%s, %s, %s, %s, %s)',
+            (str(fwd.message_id), user_id, preview, cat, ticket_id)
+        )
         conn.commit()
+        cur.close()
         conn.close()
         
         await msg.reply_text(f"📩 Enviado a moderación.\n🎫 **Tu Ticket es:** `{ticket_id}`")
@@ -136,11 +160,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     action, msg_id = query.data.split("_")
     
-    conn = sqlite3.connect('moderacion.db')
-    data = conn.execute('SELECT * FROM solicitudes WHERE msg_id = ?', (msg_id,)).fetchone()
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute('SELECT msg_id, user_id, preview, categoria, ticket_id FROM solicitudes WHERE msg_id = %s', (msg_id,))
+    data = cur.fetchone()
     
     if not data:
         await query.edit_message_text("⚠️ No encontrado o ya procesado.")
+        cur.close()
         conn.close()
         return
 
@@ -150,7 +177,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "ok":
         await context.bot.send_message(op_id, f"✅ **ENVÍO APROBADO**\n🎫 **Ticket:** `{ticket}`\n📂 **Categoría:** {cat}", parse_mode="Markdown")
         await query.edit_message_text(f"✅ APROBADO: `{ticket}` (Admin: {query.from_user.first_name})")
-        conn.execute('DELETE FROM solicitudes WHERE msg_id = ?', (msg_id,))
+        cur.execute('DELETE FROM solicitudes WHERE msg_id = %s', (msg_id,))
         conn.commit()
     
     elif action == "no":
@@ -177,6 +204,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Enviar el aviso al privado del admin por si ya lo tiene abierto
         await context.bot.send_message(query.from_user.id, f"📝 **Motivo de rechazo**\n🎫 Ticket: `{ticket}`\n📂 Categoría: {cat}\n\nEscribe el motivo aquí debajo:")
 
+    cur.close()
     conn.close()
 
 def main():
