@@ -86,8 +86,26 @@ def init_db():
 # --- MANEJADORES ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Hola. Selecciona una categoría:", 
-        reply_markup=ReplyKeyboardMarkup([["🧊 Rompehielos", "📝 Carta"], ["📱 New Feed", "🎤 Nota de voz"], ["📎 Adjunto"]], resize_keyboard=True))
+    # Limpiar estado previo
+    context.user_data.clear()
+    
+    # Debug: Imprimir perfiles detectados
+    print(f"DEBUG: Perfiles detectados: {PROFILES_LIST}")
+
+    # Si hay más de un perfil, pedir que seleccione uno primero
+    if len(PROFILES_LIST) > 1:
+        # Crear teclado con los perfiles (2 por fila si son muchos, o 1 por fila)
+        kb = [[p] for p in PROFILES_LIST]
+        await update.message.reply_text(
+            "👋 Hola. Selecciona el **Perfil** para el que vas a moderar:", 
+            reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True),
+            parse_mode="Markdown"
+        )
+        context.user_data['esperando_perfil'] = True
+    else:
+        # Solo hay un perfil, lo asignamos automáticamente
+        context.user_data['profile'] = PROFILES_LIST[0]
+        await mostrar_menu_categorias(update, context)
 
 async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
