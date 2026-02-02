@@ -25,6 +25,11 @@ except ValueError:
     raise RuntimeError("MODERATION_CHANNEL_ID debe ser un número (chat_id del canal).")
 OPCIONES_MENU = ["🧊 Rompehielos", "📝 Carta", "📱 New Feed", "🎤 Nota de voz", "📎 Adjunto"]
 
+# Lista de perfiles (separados por comas en la variable de entorno)
+# Ejemplo: PROFILES="Perfil A,Perfil B"
+RAW_PROFILES = os.getenv("PROFILES", "General")
+PROFILES_LIST = [p.strip() for p in RAW_PROFILES.split(",") if p.strip()]
+
 DB_DSN = os.getenv("DATABASE_URL")
 if not DB_DSN:
     raise RuntimeError("Falta la variable de entorno DATABASE_URL para conectar a Postgres.")
@@ -59,11 +64,22 @@ def init_db():
             user_id BIGINT,
             preview TEXT,
             categoria TEXT,
-            ticket_id TEXT
+            ticket_id TEXT,
+            perfil TEXT
         )
         """
     )
     conn.commit()
+
+    # Migración: Asegurar que la columna 'perfil' exista (para bases de datos existentes)
+    try:
+        cur = conn.cursor()
+        cur.execute("ALTER TABLE solicitudes ADD COLUMN IF NOT EXISTS perfil TEXT")
+        conn.commit()
+    except Exception as e:
+        print(f"Nota sobre migración de esquema: {e}")
+        conn.rollback()
+
     cur.close()
     conn.close()
 
@@ -86,7 +102,7 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data = esperando[user_id]
         texto_rechazo = (
             f"❌ **ENVÍO RECHAZADO**\n"
-            f"🎫 **Ticket:** `{data['ticket']}`\n"
+            f" **Ticket:** `{data['ticket']}`\n"
             f"📂 **Categoría:** {data['cat']}\n"
             f"💬 **Motivo:** {msg.text}"
         )
@@ -162,7 +178,64 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute('SELECT msg_id, user_id, preview, categoria, ticket_id FROM solicitudes WHERE msg_id = %s', (msg_id,))
+    cur.execute('SELECT msg_id, user_id, preview, categoria, ticket_id, perfil FROM solicitudes WHERE msg_id = %s', (msg_id,))
+    data = cur.fetchone()
+    
+    if not data:
+        await query.edit_message_text("⚠️ No encontrado o ya procesado.")
+        cur.close()
+        conn.close()
+        return
+
+    # data = (msg_id, user_id, preview, cat, ticket_id, perfil)
+    op_id, cat, ticket, perfil = data[1], data[3], data[4], data[5]
+
+    if action == "ok":
+        await context.bot.send_message(op_id, f"✅ **ENVÍO APROBADO**\n🆔 **Perfil:** {perfil}\n🎫 **Ticket:** `{ticket}`\n📂 **Categoría:** {cat}", parse_mode="Markdown")
+        await query.edit_message_text(f"✅ APROBADO: `{ticket}`\n🆔 Perfil: {perfil}\n(Admin: {query.from_user.first_name})")
+        cur.execute('DELETE FROM solicitudes WHERE msg_id = %s', (msg_id,))
+        conn.commit()
+    
+    elif action == "no":
+        if "esperando_motivo" not in context.bot_data:
+            context.bot_data["esperando_motivo"] = {}
+            
+        context.bot_data["esperando_motivo"][query.from_user.id] = {
+            'op_id': op_id, 'cat': cat, 'msg_id': msg_id, 'ticket': ticket, 'perfil': perfil
+        }
+        
+        bot_info = await context.bot.get_me()
+        url_bot = f"https://t.me/{bot_info.username}"
+        
+        # REINTEGRAMOS EL BOTÓN DE ENLACE AL PRIVADO
+        btn_privado = [[InlineKeyboardButton("💬 Ir al Chat para escribir motivo", url=url_bot)]]
+        
+        await query.edit_message_text(
+            f"❌ **RECHAZANDO TICKET:** `{ticket}`\n"
+            f"🆔 **Perfil:** {perfil}\n"
+            f"⚠️ Pulsa el botón de abajo para enviar el motivo por mi chat privado.",
+            reply_markup=InlineKeyboardMarkup(btn_privado),
+            parse_mode="Markdown"
+        )
+        
+        # Enviar el aviso al privado del admin por si ya lo tiene abierto
+        await context.bot.send_message(query.from_user.id, f"📝 **Motivo de rechazo**\n🆔 **Perfil:** {perfil}\n🎫 Ticket: `{ticket}`\n📂 Categoría: {cat}\n\nEscribe el motivo aquí debajo:")
+
+    cur.close()
+    conn.close()
+
+def main():
+    init_db()
+    Thread(target=start_health_server, daemon=True).start()
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, handle_messages))
+    app.add_handler(CallbackQueryHandler(callback_handler))
+    print("🚀 Bot Activo (Tickets + Botón de enlace).")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
     data = cur.fetchone()
     
     if not data:
