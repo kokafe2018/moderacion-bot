@@ -138,7 +138,10 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Si hay perfiles, preguntar perfil
         if len(PROFILES_LIST) > 1:
-            kb = [[p] for p in PROFILES_LIST]
+            # Organizar en 2 columnas
+            columnas = 2
+            kb = [PROFILES_LIST[i:i + columnas] for i in range(0, len(PROFILES_LIST), columnas)]
+
             # Añadir opción de "Atrás" para cancelar
             kb.append(["🔙 Volver al Inicio"])
             
