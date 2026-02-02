@@ -92,20 +92,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Debug: Imprimir perfiles detectados
     print(f"DEBUG: Perfiles detectados: {PROFILES_LIST}")
 
-    # Si hay más de un perfil, pedir que seleccione uno primero
-    if len(PROFILES_LIST) > 1:
-        # Crear teclado con los perfiles (2 por fila si son muchos, o 1 por fila)
-        kb = [[p] for p in PROFILES_LIST]
-        await update.message.reply_text(
-            "👋 Hola. Selecciona el **Perfil** para el que vas a moderar:", 
-            reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True),
-            parse_mode="Markdown"
-        )
-        context.user_data['esperando_perfil'] = True
-    else:
-        # Solo hay un perfil, lo asignamos automáticamente
-        context.user_data['profile'] = PROFILES_LIST[0]
-        await mostrar_menu_categorias(update, context)
+    await update.message.reply_text(
+        "👋 Hola. Selecciona una categoría:", 
+        reply_markup=ReplyKeyboardMarkup([["🧊 Rompehielos", "📝 Carta"], ["📱 New Feed", "🎤 Nota de voz"], ["📎 Adjunto"]], resize_keyboard=True)
+    )
 
 async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
@@ -120,7 +110,8 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data = esperando[user_id]
         texto_rechazo = (
             f"❌ **ENVÍO RECHAZADO**\n"
-            f" **Ticket:** `{data['ticket']}`\n"
+            f"🆔 **Perfil:** {data.get('perfil', 'General')}\n"
+            f"🎫 **Ticket:** `{data['ticket']}`\n"
             f"📂 **Categoría:** {data['cat']}\n"
             f"💬 **Motivo:** {msg.text}"
         )
@@ -141,19 +132,60 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.bot_data["esperando_motivo"] = esperando
         return
 
-    # 2. SELECCIÓN CATEGORÍA (OPERADOR)
+    # 2. SELECCIÓN CATEGORÍA (PRIMER PASO)
     if msg.text in OPCIONES_MENU:
         context.user_data['temp_cat'] = msg.text
-        await msg.reply_text(f"Elegiste {msg.text}. Envía el contenido ahora:", reply_markup=ReplyKeyboardRemove())
-        return
+        
+        # Si hay perfiles, preguntar perfil
+        if len(PROFILES_LIST) > 1:
+            kb = [[p] for p in PROFILES_LIST]
+            # Añadir opción de "Atrás" para cancelar
+            kb.append(["🔙 Volver al Inicio"])
+            
+            await msg.reply_text(
+                f"Has elegido: **{msg.text}**\nAhora selecciona el **Perfil**:",
+                reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True),
+                parse_mode="Markdown"
+            )
+            context.user_data['esperando_perfil'] = True
+            return
+        else:
+            # Si solo hay un perfil, asignarlo y pedir contenido directo
+            context.user_data['profile'] = PROFILES_LIST[0]
+            await msg.reply_text(f"Elegiste {msg.text}. Envía el contenido ahora:", reply_markup=ReplyKeyboardRemove())
+            return
 
-    # 3. ENVÍO AL CANAL CON TICKET
-    if 'temp_cat' in context.user_data:
+    # 3. SELECCIÓN DE PERFIL (SEGUNDO PASO)
+    if context.user_data.get('esperando_perfil'):
+        if msg.text == "🔙 Volver al Inicio":
+            await start(update, context)
+            return
+
+        if msg.text in PROFILES_LIST:
+            context.user_data['profile'] = msg.text
+            del context.user_data['esperando_perfil']
+            
+            cat = context.user_data.get('temp_cat', 'Desconocido')
+            perfil = context.user_data['profile']
+            
+            await msg.reply_text(
+                f"✅ Configuración lista:\n📂 Categoria: **{cat}**\n🆔 Perfil: **{perfil}**\n\n📤 **Envía el contenido ahora:**", 
+                reply_markup=ReplyKeyboardRemove(), 
+                parse_mode="Markdown"
+            )
+            return
+        else:
+            await msg.reply_text("⚠️ Por favor selecciona un perfil válido del menú.")
+            return
+
+    # 4. ENVÍO AL CANAL CON TICKET (TERCER PASO)
+    if 'temp_cat' in context.user_data and 'profile' in context.user_data:
         if not (msg.text or msg.caption or msg.photo or msg.document or msg.audio or msg.video or msg.voice or msg.animation or msg.sticker):
             await msg.reply_text("⚠️ No se reconoce contenido válido para enviar a moderación. Envía texto o algún tipo de archivo soportado.")
             return
 
         cat = context.user_data['temp_cat']
+        perfil = context.user_data['profile']
         ticket_id = f"TK-{random.randint(1000, 9999)}"
         preview = (msg.text or msg.caption or "Multimedia")[:35]
         
@@ -161,6 +193,7 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         texto_panel = (
             f"🎫 **TICKET:** `{ticket_id}`\n"
+            f"🆔 **Perfil:** {perfil}\n"
             f"🏷 **Categoría:** {cat}\n"
             f"👤 **De:** {update.effective_user.full_name}\n"
             f"📝 **Vista:** {preview}..."
@@ -175,15 +208,16 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            'INSERT INTO solicitudes (msg_id, user_id, preview, categoria, ticket_id) VALUES (%s, %s, %s, %s, %s)',
-            (str(fwd.message_id), user_id, preview, cat, ticket_id)
+            'INSERT INTO solicitudes (msg_id, user_id, preview, categoria, ticket_id, perfil) VALUES (%s, %s, %s, %s, %s, %s)',
+            (str(fwd.message_id), user_id, preview, cat, ticket_id, perfil)
         )
         conn.commit()
         cur.close()
         conn.close()
         
         await msg.reply_text(f"📩 Enviado a moderación.\n🎫 **Tu Ticket es:** `{ticket_id}`")
-        del context.user_data['temp_cat']
+        # Limpiamos todo para empezar de cero la próxima vez
+        context.user_data.clear()
 
         return
 
